@@ -220,13 +220,13 @@ int main(void) {
 
 
     // ####### LOW-PASS FILTER #######
-    steer = steer * (1.0 - FILTER) + cmd1 * FILTER;
-    speed = speed * (1.0 - FILTER) + cmd2 * FILTER;
+    //steer = steer * (1.0 - FILTER) + cmd1 * FILTER;
+    //speed = speed * (1.0 - FILTER) + cmd2 * FILTER;
 
 
     // ####### MIXER #######
-    speedR = CLAMP(speed * SPEED_COEFFICIENT -  steer * STEER_COEFFICIENT, -1000, 1000);
-    speedL = CLAMP(speed * SPEED_COEFFICIENT +  steer * STEER_COEFFICIENT, -1000, 1000);
+    speedR = CLAMP(cmd1, -1000, 1000);
+    speedL = CLAMP(cmd2, -1000, 1000);
 
 
     #ifdef ADDITIONAL_CODE

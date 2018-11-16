@@ -43,6 +43,7 @@ int cmd3;
 typedef struct{
    int16_t steer;
    int16_t speed;
+   uint32_t counter;
    //uint32_t crc;
 } Serialcommand;
 
@@ -50,8 +51,12 @@ volatile Serialcommand command;
 
 uint8_t button1, button2;
 
+const int serial_timeout = 50;
+
 int steer; // global variable for steering. -1000 to 1000
 int speed; // global variable for speed. -1000 to 1000
+uint32_t counter; // global variable for timeout counter
+uint32_t time_since_last_tick;
 
 extern volatile int pwml;  // global variable for pwm left. -1000 to 1000
 extern volatile int pwmr;  // global variable for pwm right. -1000 to 1000
@@ -150,7 +155,7 @@ int main(void) {
 
   #ifdef CONTROL_SERIAL_USART2
     UART_Control_Init();
-    HAL_UART_Receive_DMA(&huart2, (uint8_t *)&command, 4);
+    HAL_UART_Receive_DMA(&huart2, (uint8_t *)&command, 8);
   #endif
 
   #ifdef DEBUG_I2C_LCD
@@ -215,6 +220,18 @@ int main(void) {
       cmd1 = CLAMP((int16_t)command.steer, -1000, 1000);
       cmd2 = CLAMP((int16_t)command.speed, -1000, 1000);
 
+      if (counter != command.counter) {
+        counter = command.counter;
+        time_since_last_tick = 0;
+      } else {
+        time_since_last_tick += DELAY_IN_MAIN_LOOP;
+      }
+
+      if (time_since_last_tick >= serial_timeout) {
+        cmd1 = 0;
+        cmd2 = 0;
+      }
+
       timeout = 0;
     #endif
 
@@ -256,7 +273,7 @@ int main(void) {
       // ####### CALC BOARD TEMPERATURE #######
       board_temp_adc_filtered = board_temp_adc_filtered * 0.99 + (float)adc_buffer.temp * 0.01;
       board_temp_deg_c = ((float)TEMP_CAL_HIGH_DEG_C - (float)TEMP_CAL_LOW_DEG_C) / ((float)TEMP_CAL_HIGH_ADC - (float)TEMP_CAL_LOW_ADC) * (board_temp_adc_filtered - (float)TEMP_CAL_LOW_ADC) + (float)TEMP_CAL_LOW_DEG_C;
-      
+
       // ####### DEBUG SERIAL OUT #######
       #ifdef CONTROL_ADC
         setScopeChannel(0, (int)adc_buffer.l_tx2);  // 1: ADC1

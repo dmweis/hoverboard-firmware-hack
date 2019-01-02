@@ -36,25 +36,31 @@ extern volatile adc_buf_t adc_buffer;
 extern I2C_HandleTypeDef hi2c2;
 extern UART_HandleTypeDef huart2;
 
-int cmd1;  // normalized input values. -1000 to 1000
-int cmd2;
+int cmdLeft;  // normalized input values. -1000 to 1000
+int cmdRight;
 int cmd3;
 
 typedef struct{
-   int16_t steer;
-   int16_t speed;
+   int16_t left;
+   int16_t right;
    uint32_t counter;
-   //uint32_t crc;
+   uint8_t checksum;
 } Serialcommand;
 
 volatile Serialcommand command;
+volatile Serialcommand command_buffer;
+
+#define SERIAL_BUFFER_SIZE 100
+
+volatile uint8_t serial_buffer[SERIAL_BUFFER_SIZE];
+volatile uint8_t serial_buffer_pointer = 0;
 
 uint8_t button1, button2;
 
 const int serial_timeout = 50;
 
-int steer; // global variable for steering. -1000 to 1000
-int speed; // global variable for speed. -1000 to 1000
+// int steer; // global variable for steering. -1000 to 1000
+// int speed; // global variable for speed. -1000 to 1000
 uint32_t counter; // global variable for timeout counter
 uint32_t time_since_last_tick;
 
@@ -80,9 +86,89 @@ extern volatile uint16_t ppm_captured_value[PPM_NUM_CHANNELS+1];
 
 int milli_vel_error_sum = 0;
 
+/*
+ * UnStuffData decodes "length" bytes of data at
+ * the location pointed to by "ptr", writing the
+ * output to the location pointed to by "dst".
+ *
+ * Returns the length of the decoded data
+ * (which is guaranteed to be <= length).
+ * function taken from wikipedia page: https://en.wikipedia.org/wiki/Consistent_Overhead_Byte_Stuffing
+ */
+size_t UnStuffData(const uint8_t *ptr, size_t length, uint8_t *dst)
+{
+    const uint8_t *start = dst, *end = ptr + length;
+    uint8_t code = 0xFF, copy = 0;
+
+    for (; ptr < end; copy--) {
+        if (copy != 0) {
+            *dst++ = *ptr++;
+        } else {
+            if (code != 0xFF)
+                *dst++ = 0;
+            copy = code = *ptr++;
+            if (code == 0)
+                break; /* Source length too long */
+        }
+    }
+    return dst - start;
+}
+
+/*
+ * 8 bit checksum
+*/
+uint8_t checksum(uint8_t *data, size_t len){
+    uint32_t sum;
+    for ( sum = 0; len != 0; len--){
+        sum += *(data++);
+    }
+    return (uint8_t)sum;
+}
+
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    uint8_t current_byte = serial_buffer[serial_buffer_pointer];
+    if (current_byte == 0){
+        size_t length = UnStuffData((uint8_t *)&serial_buffer, serial_buffer_pointer, (uint8_t *)&command_buffer);
+        serial_buffer_pointer = 0;
+        // debug code
+        // uint8_t uart_buf[100];
+        if (length == 9){
+            if (command_buffer.checksum == checksum((uint8_t *)&command_buffer, 8)){
+                memcpy((uint8_t *)&command, (uint8_t *)&command_buffer, 9);
+                // debug code
+                // sprintf(uart_buf, "command left:%i right:%i time: %i, incoming checksum: %i, checksum:%i\r\n", 
+                // command_buffer.left,
+                // command_buffer.right,
+                // command_buffer.counter,
+                // command_buffer.checksum,
+                // checksum((uint8_t *)&command_buffer, 8));
+                // consoleLog(uart_buf);
+            } /*else {
+                sprintf(uart_buf, "Corrupt checksum left:%i right:%i time: %i, incoming checksum: %i, checksum:%i\r\n", 
+                command_buffer.left,
+                command_buffer.right,
+                command_buffer.counter,
+                command_buffer.checksum,
+                checksum((uint8_t *)&command_buffer, 8));
+
+                consoleLog(uart_buf);
+            }*/
+        } /*else {
+            sprintf(uart_buf, "Corrupted packet length:%i size:%i checksum:%i\r\n", length, 9, checksum((uint8_t *)&command_buffer, 8));
+            consoleLog(uart_buf);
+        }*/
+    } else {
+        serial_buffer_pointer++;
+    }
+    // uint8_t uart_buf[100];
+    // sprintf(uart_buf, "Hello David! 1:%i 2:%i\r\n", serial_buffer[serial_buffer_pointer], serial_buffer_pointer);
+    // consoleLog(uart_buf);
+    HAL_UART_Receive_DMA(&huart2, (uint8_t *)&serial_buffer[serial_buffer_pointer], 1);
+}
 
 void poweroff() {
-    if (abs(speed) < 20) {
+    if (abs(command.left) < 20 && abs(command.right) < 20) {
         buzzerPattern = 0;
         enable = 0;
         for (int i = 0; i < 8; i++) {
@@ -155,7 +241,7 @@ int main(void) {
 
   #ifdef CONTROL_SERIAL_USART2
     UART_Control_Init();
-    HAL_UART_Receive_DMA(&huart2, (uint8_t *)&command, 8);
+    HAL_UART_Receive_DMA(&huart2, (uint8_t *)&serial_buffer, 1);
   #endif
 
   #ifdef DEBUG_I2C_LCD
@@ -185,29 +271,35 @@ int main(void) {
 
   enable = 1;  // enable motors
 
+  for (int i = 0; i <= 16; i++) {
+    buzzerFreq = i;
+    HAL_Delay(100);
+  }
+  buzzerFreq = 0;
+
   while(1) {
     HAL_Delay(DELAY_IN_MAIN_LOOP); //delay in ms
 
     #ifdef CONTROL_NUNCHUCK
       Nunchuck_Read();
-      cmd1 = CLAMP((nunchuck_data[0] - 127) * 8, -1000, 1000); // x - axis. Nunchuck joystick readings range 30 - 230
-      cmd2 = CLAMP((nunchuck_data[1] - 128) * 8, -1000, 1000); // y - axis
+      cmdLeft = CLAMP((nunchuck_data[0] - 127) * 8, -1000, 1000); // x - axis. Nunchuck joystick readings range 30 - 230
+      cmdRight = CLAMP((nunchuck_data[1] - 128) * 8, -1000, 1000); // y - axis
 
       button1 = (uint8_t)nunchuck_data[5] & 1;
       button2 = (uint8_t)(nunchuck_data[5] >> 1) & 1;
     #endif
 
     #ifdef CONTROL_PPM
-      cmd1 = CLAMP((ppm_captured_value[0] - 500) * 2, -1000, 1000);
-      cmd2 = CLAMP((ppm_captured_value[1] - 500) * 2, -1000, 1000);
+      cmdLeft = CLAMP((ppm_captured_value[0] - 500) * 2, -1000, 1000);
+      cmdRight = CLAMP((ppm_captured_value[1] - 500) * 2, -1000, 1000);
       button1 = ppm_captured_value[5] > 500;
       float scale = ppm_captured_value[2] / 1000.0f;
     #endif
 
     #ifdef CONTROL_ADC
       // ADC values range: 0-4095, see ADC-calibration in config.h
-      cmd1 = CLAMP(adc_buffer.l_tx2 - ADC1_MIN, 0, ADC1_MAX) / (ADC1_MAX / 1000.0f);  // ADC1
-      cmd2 = CLAMP(adc_buffer.l_rx2 - ADC2_MIN, 0, ADC2_MAX) / (ADC2_MAX / 1000.0f);  // ADC2
+      cmdLeft = CLAMP(adc_buffer.l_tx2 - ADC1_MIN, 0, ADC1_MAX) / (ADC1_MAX / 1000.0f);  // ADC1
+      cmdRight = CLAMP(adc_buffer.l_rx2 - ADC2_MIN, 0, ADC2_MAX) / (ADC2_MAX / 1000.0f);  // ADC2
 
       // use ADCs as button inputs:
       button1 = (uint8_t)(adc_buffer.l_tx2 > 2000);  // ADC1
@@ -217,8 +309,8 @@ int main(void) {
     #endif
 
     #ifdef CONTROL_SERIAL_USART2
-      cmd1 = CLAMP((int16_t)command.steer, -1000, 1000);
-      cmd2 = CLAMP((int16_t)command.speed, -1000, 1000);
+      cmdLeft = CLAMP((int16_t)command.left, -1000, 1000);
+      cmdRight = CLAMP((int16_t)command.right, -1000, 1000);
 
       if (counter != command.counter) {
         counter = command.counter;
@@ -228,8 +320,8 @@ int main(void) {
       }
 
       if (time_since_last_tick >= serial_timeout) {
-        cmd1 = 0;
-        cmd2 = 0;
+        cmdLeft = 0;
+        cmdRight = 0;
       }
 
       timeout = 0;
@@ -237,13 +329,13 @@ int main(void) {
 
 
     // ####### LOW-PASS FILTER #######
-    //steer = steer * (1.0 - FILTER) + cmd1 * FILTER;
-    //speed = speed * (1.0 - FILTER) + cmd2 * FILTER;
+    //steer = steer * (1.0 - FILTER) + cmdLeft * FILTER;
+    //speed = speed * (1.0 - FILTER) + cmdRight * FILTER;
 
 
     // ####### MIXER #######
-    speedR = CLAMP(cmd1, -1000, 1000);
-    speedL = CLAMP(cmd2, -1000, 1000);
+    speedR = CLAMP(cmdLeft, -1000, 1000);
+    speedL = CLAMP(cmdRight, -1000, 1000);
 
 
     #ifdef ADDITIONAL_CODE
@@ -298,7 +390,7 @@ int main(void) {
 
 
     // ####### BEEP AND EMERGENCY POWEROFF #######
-    if ((TEMP_POWEROFF_ENABLE && board_temp_deg_c >= TEMP_POWEROFF && abs(speed) < 20) || (batteryVoltage < ((float)BAT_LOW_DEAD * (float)BAT_NUMBER_OF_CELLS) && abs(speed) < 20)) {  // poweroff before mainboard burns OR low bat 3
+    if ((TEMP_POWEROFF_ENABLE && board_temp_deg_c >= TEMP_POWEROFF) || (batteryVoltage < ((float)BAT_LOW_DEAD * (float)BAT_NUMBER_OF_CELLS))) {  // poweroff before mainboard burns OR low bat 3
       poweroff();
     } else if (TEMP_WARNING_ENABLE && board_temp_deg_c >= TEMP_WARNING) {  // beep if mainboard gets hot
       buzzerFreq = 4;
@@ -309,7 +401,7 @@ int main(void) {
     } else if (batteryVoltage < ((float)BAT_LOW_LVL2 * (float)BAT_NUMBER_OF_CELLS) && batteryVoltage > ((float)BAT_LOW_DEAD * (float)BAT_NUMBER_OF_CELLS) && BAT_LOW_LVL2_ENABLE) {  // low bat 2: fast beep
       buzzerFreq = 5;
       buzzerPattern = 6;
-    } else if (BEEPS_BACKWARD && speed < -50) {  // backward beep
+    } else if (BEEPS_BACKWARD && speedL < -50 && speedR < -50) {  // backward beep
       buzzerFreq = 5;
       buzzerPattern = 1;
     } else {  // do not beep
